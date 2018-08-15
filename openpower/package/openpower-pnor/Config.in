@@ -1,19 +1,55 @@
 config BR2_PACKAGE_OPENPOWER_PNOR
         bool "openpower_pnor"
-        default y if (BR2_OPENPOWER_PLATFORM && BR2_powerpc_power8)
-        select BR2_PACKAGE_HOSTBOOT
+        default y if (BR2_OPENPOWER_PLATFORM)
+        select BR2_PACKAGE_HOSTBOOT if !BR2_OPENPOWER_POWER8
+        select BR2_PACKAGE_HOSTBOOT_P8 if BR2_OPENPOWER_POWER8
         select BR2_PACKAGE_HOSTBOOT_BINARIES
         select BR2_PACKAGE_SKIBOOT
         select BR2_PACKAGE_OPENPOWER_FFS
-        select BR2_PACKAGE_OCC
+        select BR2_PACKAGE_OCC if !BR2_OPENPOWER_POWER8
+        select BR2_PACKAGE_OCC_P8 if BR2_OPENPOWER_POWER8
         select BR2_PACKAGE_CAPP_UCODE
-        select BR2_PACKAGE_BARRELEYE_XML if (BR2_OPENPOWER_XML_PACKAGE = "barreleye-xml")
-        select BR2_PACKAGE_FIRESTONE_XML if (BR2_OPENPOWER_XML_PACKAGE = "firestone-xml")
-        select BR2_PACKAGE_GARRISON_XML if (BR2_OPENPOWER_XML_PACKAGE = "garrison-xml")
-        select BR2_PACKAGE_HABANERO_XML if (BR2_OPENPOWER_XML_PACKAGE = "habanero-xml")
-        select BR2_PACKAGE_PALMETTO_XML if (BR2_OPENPOWER_XML_PACKAGE = "palmetto-xml")
+        select BR2_PACKAGE_IMA_CATALOG
+        select BR2_PACKAGE_HOST_OPENPOWER_VPNOR
+        select BR2_PACKAGE_MACHINE_XML
+        select BR2_PACKAGE_HCODE if BR2_OPENPOWER_POWER9
         help
             Utilites for building a targeting binary image
+
+menu "OpenPOWER PNOR assembly options"
+
+choice
+    prompt "Secure Boot key transition type"
+    default BR2_OPENPOWER_SECUREBOOT_NO_KEY_TRANSITION
+
+config BR2_OPENPOWER_SECUREBOOT_NO_KEY_TRANSITION
+    bool "None"
+    help
+      Builds a driver that does not transition Secure Boot keys
+
+config BR2_OPENPOWER_SECUREBOOT_KEY_TRANSITION_TO_DEV
+    bool "Transition existing keys to development keys"
+    help
+      Builds a driver that transitions Secure Boot keys to development keys and
+      powers off the system.  Only usable when system security has been
+      disabled.
+
+config BR2_OPENPOWER_SECUREBOOT_KEY_TRANSITION_TO_PROD
+    bool "Transition development keys to production keys"
+    help
+      Builds a driver that transitions Secure Boot development keys to
+      vendor supplied production keys and powers off the system.
+
+endchoice
+
+config BR2_OPENPOWER_SECUREBOOT_SIGN_MODE
+        string "Secureboot signing mode"
+        default "development"
+        help
+            Available options [development | production]
+            Indicates the signing mode when generating the PNOR image.  Only
+            applicable when hostboot is compiled with SECUREBOOT compile flag.
+            Default mode is development.
 
 config BR2_OPENPOWER_PNOR_XML_LAYOUT_FILENAME
         string "Name of Openpower pnor xml layout file"
@@ -24,11 +60,6 @@ config BR2_OPENPOWER_CONFIG_NAME
         string "Name of configuration"
         help
             String used to define configuration name
-
-config BR2_OPENPOWER_XML_PACKAGE
-        string "Name of xml/targeting package"
-        help
-            String defines the xml/targeting package used
 
 config BR2_OPENPOWER_PNOR_FILENAME
         string "Name of pnor file to be created"
@@ -63,16 +94,55 @@ config BR2_HOSTBOOT_BINARY_SBE_FILENAME
         help
             String used to define name of sbe hostboot binary file
 
-
 config BR2_HOSTBOOT_BINARY_SBEC_FILENAME
         string "Name of sbec hostboot binary"
         help
             String used to define name of sbec hostboot binary file
 
+config BR2_HOSTBOOT_BINARY_IONV_FILENAME
+        string "Name of IONV binary"
+        default "ionv.bin"
+        help
+            String used to define name of ionv binary file
+
 config BR2_HOSTBOOT_BINARY_WINK_FILENAME
         string "Name of winkle hostboot binary"
         help
             String used to define name of winkle hostboot binary file
+
+config BR2_WOFDATA_FILENAME
+        string "Name of wofdata original file"
+        default "wof_output"
+        help
+            String used to define name of wofdata original file
+
+config BR2_WOFDATA_BINARY_FILENAME
+        string "Name of wofdata binary file"
+        default "wofdata.bin.ecc"
+        help
+            String used to define name of wofdata binary ecc'd file
+
+config BR2_MEMDDATA_FILENAME
+        string "Name of memd original file"
+        default "memd_output.dat"
+        help
+            String used to define name of memd original file
+
+config BR2_MEMDDATA_BINARY_FILENAME
+        string "Name of memd binary file"
+        default "memd_extra_data.bin.ecc"
+        help
+            String used to define the name of the memd binary ecc'd file
+
+config BR2_IMA_CATALOG_FILENAME
+        string "Name of IMA catalog binary"
+        help
+            String used to define name of IMA catalog binary file
+
+config BR2_IMA_CATALOG_ECC_FILENAME
+        string "Name of IMA catalog binary"
+        help
+            String used to define name of IMA catalog binary file, ecc protected
 
 config BR2_OPENPOWER_TARGETING_BIN_FILENAME
         string "Name of openpower binary targeting file"
@@ -87,3 +157,9 @@ config BR2_OPENPOWER_TARGETING_ECC_FILENAME
 config BR2_OPENPOWER_PNOR_XZ_ENABLED
         bool "Enable xz compression in PNOR payloads"
         default n
+
+config BR2_BUILD_PNOR_SQUASHFS
+        bool "Create a virtual PNOR image along with the standard image"
+        default y
+
+endmenu

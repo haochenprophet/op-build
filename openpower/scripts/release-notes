@@ -1,43 +1,305 @@
-#!/bin/env perl
+#!/usr/bin/env perl
+
 use strict;
+
+use Getopt::Long;
+use DBI;
+
+# We use an in-memory SQLite database as SQL is good for doing queries
+# of differences between data sets, and doing that in perl is annoying.
+my $db = "dbi:SQLite:dbname=release-notes.sqlite";
+#my $dbh = DBI->connect("dbi:SQLite:dbname=:memory:","","");
+my $dbh = DBI->connect($db,undef,undef, {AutoCommit => 1, RaiseError=>1});
 
 my $repos =
 {
-    'op-build' => { REPO => "http://github.com/open-power/op-build" },
-    'hostboot' => { REPO => "http://github.com/open-power/hostboot" ,
-                    DIR => "openpower/package/hostboot",
-                    PACKAGE => "HOSTBOOT" },
-    'skiboot'  => { REPO => "http://github.com/open-power/skiboot" ,
-                    DIR => "openpower/package/skiboot",
-                    PACKAGE => "SKIBOOT" },
-    'occ'      => { REPO => "http://github.com/open-power/occ" ,
-                    DIR => "openpower/package/occ",
-                    PACKAGE => "OCC" },
-    'pnor'     => { REPO => "http://github.com/open-power/pnor" ,
-                    DIR => "openpower/package/openpower-pnor",
-                    PACKAGE => "OPENPOWER_PNOR" },
-    'palmetto-xml' => { REPO => "http://github.com/open-power/palmetto-xml" ,
-                    DIR => "openpower/package/palmetto-xml",
-                    PACKAGE => "PALMETTO_XML" },
-    'habanero-xml' => { REPO => "http://github.com/open-power/habanero-xml" ,
-                    DIR => "openpower/package/habanero-xml",
-                    PACKAGE => "HABANERO_XML" },
-    'firestone-xml' => { REPO => "http://github.com/open-power/firestone-xml" ,
-                    DIR => "openpower/package/firestone-xml",
-                    PACKAGE => "FIRESTONE_XML" },
-    'garrison-xml'  => { REPO => "http://github.com/open-power/garrison-xml" ,
-                    DIR => "openpower/package/garrison-xml",
-                    PACKAGE => "GARRISON_XML" },
-    'barreleye-xml'  => { REPO => "http://github.com/open-power/barreleye-xml" ,
-                    DIR => "openpower/package/barreleye-xml",
-                    PACKAGE => "BARRELEYE_XML" },
-    'petitboot'     => { REPO => "http://github.com/open-power/petitboot" ,
-                    DIR => "openpower/package/petitboot",
-                    PACKAGE => "PETITBOOT" },
+    'op-build' => { REPO => "https://github.com/open-power/op-build" },
+    'hcode'    => { REPO => "https://github.com/open-power/hcode" ,
+                    DIR => "openpower/package/hcode" },
+    'hostboot' => { REPO => "https://github.com/open-power/hostboot" ,
+                    DIR => "openpower/package/hostboot" },
+    'sbe'      => { REPO => "https://github.com/open-power/sbe" ,
+                    DIR => "openpower/package/sbe"},
+    'skiboot'  => { REPO => "https://github.com/open-power/skiboot" ,
+                    DIR => "openpower/package/skiboot"},
+    'occ'      => { REPO => "https://github.com/open-power/occ" ,
+                    DIR => "openpower/package/occ"},
+    'pnor'     => { REPO => "https://github.com/open-power/pnor" ,
+                    DIR => "openpower/package/openpower-pnor"},
+    'petitboot'     => { REPO => "https://github.com/open-power/petitboot" ,
+			 DIR => "openpower/package/petitboot"},
 };
 
-my $begin_release = shift;
-my $end_release = shift;
+my $begin_release;
+my $end_release;
+my $begin_worktree;
+my $end_worktree;
+my $platform;
+
+GetOptions("begin-release=s" => \$begin_release,
+	   "end-release=s" => \$end_release,
+	   "begin-worktree=s" => \$begin_worktree,
+	   "platform=s" => \$platform,
+	   "end-worktree=s" => \$end_worktree)
+    or die("Error in command line arguments");
+
+die "Required argument missing" unless ($begin_release and $end_release and $begin_worktree and $end_worktree);
+
+open(OUTPUT, "> RELEASE.md") || die "Failed to open RELEASE.md";
+
+print OUTPUT "# Release Notes for OpenPower Firmware $end_release\n";
+
+if (-e $begin_worktree) {
+    system("cd $begin_worktree && git checkout $begin_release && git submodule update --reference ../buildroot && git submodule update") and die "Could not update $begin_worktree";
+} else {
+    system("git worktree add $begin_worktree $begin_release && cd $begin_worktree&& git submodule update --reference ../buildroot && git submodule update && rm -rf dl && ln -s ../dl dl") and die "Couldn't init $begin_worktree";
+}
+
+if (-e $end_worktree) {
+    system("cd $end_worktree && git checkout $end_release  && git submodule update --reference ../buildroot && git submodule update") and die "Could not update $end_worktree";
+} else {
+    system("git worktree add $end_worktree $end_release && cd $end_worktree && git submodule update --reference ../buildroot && git submodule update && rm -rf dl && ln -s ../dl dl") and die "Couldn't init $end_worktree";
+}
+
+opendir (my $dh, "$begin_worktree/openpower/configs")
+    or die "can't scan $begin_worktree defconfigs";
+my @begin_platforms = grep { /.*_defconfig/ } readdir($dh);
+closedir $dh;
+
+opendir (my $dh, "$end_worktree/openpower/configs")
+    or die "can't scan $end_worktree defconfigs";
+my @end_platforms = grep { /.*_defconfig/ } readdir($dh);
+closedir $dh;
+
+s/_defconfig// foreach (@begin_platforms);
+s/_defconfig// foreach (@end_platforms);
+
+my $witherspoon_insanity;
+
+# If both witherspoon and witherspoon-sequoia exist we've switched back
+# to a single witherspoon platform and the -sequoia platform is just to
+# keep Jenkins happy - ignore it.
+if ("witherspoon" ~~ @begin_platforms
+	&& "witherspoon-sequoia" ~~ @begin_platforms) {
+	my $index = 0;
+	$index++ until @begin_platforms[$index] eq "witherspoon-sequoia";
+	splice(@begin_platforms, $index, 1);
+}
+
+if ("witherspoon" ~~ @end_platforms
+	&& "witherspoon-sequoia" ~~ @end_platforms) {
+	my $index = 0;
+	$index++ until @end_platforms[$index] eq "witherspoon-sequoia";
+	splice(@end_platforms, $index, 1);
+}
+
+if (($platform && $platform eq 'witherspoon')
+    && -f "$end_worktree/openpower/configs/witherspoon-sequoia_defconfig") {
+    @begin_platforms = ('witherspoon');
+    @end_platforms = ('witherspoon-sequoia', 'witherspoon-redbud');
+    $witherspoon_insanity = 1;
+} elsif ($platform) {
+    @begin_platforms = ($platform);
+    @end_platforms = ($platform);
+}
+
+$dbh->do("CREATE TABLE platforms (platform TEXT, version TEXT);") or die "$!";
+{
+    my $q = "INSERT INTO platforms (platform,version) VALUES (?,?)";
+    my $sth = $dbh->prepare($q) or die "$!";
+    $sth->execute($_, $begin_release) foreach (@begin_platforms);
+    $sth->execute($_, $end_release) foreach (@end_platforms);
+}
+
+{
+    my $q = "SELECT platform as p FROM platforms WHERE version is ? AND platform NOT IN (SELECT platform FROM platforms WHERE version is ? and platform=p)";
+    my $sth = $dbh->prepare($q) or die $!;
+    $sth->execute($begin_release, $end_release);
+    my $r;
+    print OUTPUT "\n## Removed platforms\n\n- ".$r->{p}."\n" if $r = $sth->fetchrow_hashref;
+    print OUTPUT "- ".$r->{p}."\n" while ($r = $sth->fetchrow_hashref);
+
+    $sth->execute($end_release, $begin_release);
+    print OUTPUT "\n## New platforms\n\n- ".$r->{p}."\n" if $r = $sth->fetchrow_hashref;
+    print OUTPUT "- ".$r->{p}."\n" while($r = $sth->fetchrow_hashref);
+}
+
+my @common_platforms;
+{
+    my $q = "SELECT platform as p FROM platforms WHERE version is ? AND EXISTS (select platform from platforms where version is ? and platform=p)";
+    my $sth = $dbh->prepare($q) or die $!;
+    $sth->execute($begin_release, $end_release);
+    my $r;
+    push @common_platforms, $r->{p} while ($r = $sth->fetchrow_hashref);
+}
+
+use Data::Dumper;
+
+print "# COMMON PLATFORMS\n";
+print Dumper(\@common_platforms);
+
+foreach my $p (@common_platforms) {
+    next if $p =~ /firenze/;
+    next if $p =~ /^zz$/;
+    next if $p =~ /mambo/;
+    next if $p =~ /redbud/;
+    next if $p =~ /pseries/;
+    next if $p =~ /witherspoon-redbud/;
+    if ($p =~ /witherspoon-sequoia/) {
+	    $p = "witherspoon";
+	    $witherspoon_insanity = 1;
+    }
+    $repos->{"$p-xml"} = { REPO => "https://github.com/open-power/$p-xml" ,
+			   DIR => "openpower/package/$p-xml" };
+}
+
+foreach my $p (@begin_platforms) {
+    system("bash -c '(cd $begin_worktree && . op-build-env && op-build ".$p."_defconfig && op-build legal-info)'");
+    # Work-around bug in op-build v1.17, fixed 2 commits later
+    system('sed -e \'s/,""\([^",]\)/,"\1/; s/\([^,]\)"",/\1",/; s/machine-xml-"\(.*\)".tar/machine-xml-\1.tar/\' -i '. $begin_worktree .'/output/legal-info/manifest.csv');
+    # Forgive me for this....
+    system("sqlite3 release-notes.sqlite \".mode csv\" \".import $begin_worktree/output/legal-info/manifest.csv i\"");
+    $dbh->do("ALTER TABLE i RENAME to 'begin_".$p."_manifest'") or die $!;
+}
+
+foreach my $p (@end_platforms) {
+    print "# END PLATFORMS LEGAL-INFO $p\n";
+    system("bash -c '(cd $end_worktree && . op-build-env && op-build ".$p."_defconfig && op-build legal-info)'");
+    # Forgive me for this....
+    print "# loading manifest\n";
+    system("sqlite3 release-notes.sqlite \".mode csv\" \".import $end_worktree/output/legal-info/manifest.csv i\"");
+    $dbh->do("ALTER TABLE i RENAME to 'end_".$p."_manifest'") or die $!;
+}
+
+if ($witherspoon_insanity) {
+    $dbh->do("ALTER TABLE 'end_witherspoon-sequoia_manifest' RENAME to end_witherspoon_manifest");
+    $dbh->do("ALTER TABLE 'begin_witherspoon-sequoia_manifest' RENAME to begin_witherspoon_manifest");
+    @end_platforms = grep { $_ != 'witherspoon-sequoia' } @end_platforms;
+    @begin_platforms = grep { $_ != 'witherspoon-sequoia' } @begin_platforms;
+    push @end_platforms, 'witherspoon';
+    push @begin_platforms, 'witherspoon';
+    push @common_platforms, 'witherspoon';
+}
+
+$dbh->do(<<'SQL') or die "$!";
+CREATE TABLE package_upgrades (
+  PACKAGE TEXT,
+  OLDVERSION TEXT,
+  NEWVERSION TEXT,
+  PLATFORM TEXT
+)
+SQL
+
+foreach my $p (@common_platforms) {
+    $dbh->do("INSERT INTO package_upgrades select b.package,b.version,e.version,'$p' from 'begin_".$p."_manifest' as b LEFT JOIN 'end_".$p."_manifest' AS e ON b.package=e.package WHERE b.version != e.version") or die $!;
+}
+
+$dbh->do(<<'SQL') or die "$!";
+CREATE TABLE new_package (
+  PACKAGE TEXT,
+  VERSION TEXT,
+  PLATFORM TEXT
+)
+SQL
+
+foreach my $p (@common_platforms) {
+    $dbh->do("INSERT INTO new_package select b.package,b.version,'$p' from 'end_".$p."_manifest' as b WHERE NOT EXISTS(SELECT package FROM 'begin_".$p."_manifest' AS e WHERE b.package=e.package)") or die $!;
+}
+
+$dbh->do(<<'SQL') or die "$!";
+CREATE TABLE removed_package (
+  PACKAGE TEXT,
+  VERSION TEXT,
+  PLATFORM TEXT
+)
+SQL
+
+foreach my $p (@common_platforms) {
+    $dbh->do("INSERT INTO removed_package select b.package,b.version,'$p' from 'begin_".$p."_manifest' as b WHERE NOT EXISTS(SELECT package FROM 'end_".$p."_manifest' AS e WHERE b.package=e.package)") or die $!;
+}
+
+my $old_level = {};
+my $new_level = {};
+
+{
+    my $q = <<'SQL';
+select package as pk ,oldversion as o ,newversion as n, 
+	GROUP_CONCAT(platform,', ') as ps
+FROM package_upgrades 
+	GROUP BY package,oldversion,newversion
+ORDER BY package,platform
+SQL
+    my $sth = $dbh->prepare($q) or die $!;
+    $sth->execute();
+
+    print OUTPUT "\n## Updated Packages\n\n";
+    print OUTPUT "Package | Old Version | New Version | Platforms\n";
+    my $t;
+    my ($plen,$olen,$nlen,$platlen) = (3,3,3,3);
+    while (my $r = $sth->fetchrow_hashref) {
+	$t.= join(' | ',($r->{pk}, $r->{o}, $r->{n}, $r->{ps}))."\n" ;
+	$plen = length($r->{pk}) if $plen < length($r->{pk});
+	$olen = length($r->{o}) if $olen < length($r->{o});
+	$nlen = length($r->{n}) if $nlen < length($r->{n});
+	$platlen = length($r->{ps}) if $platlen < length($r->{ps});
+
+	if ($r->{pk} eq 'machine-xml') {
+	    $old_level->{$r->{ps}."-xml"} = $r->{o};
+	    $new_level->{$r->{ps}."-xml"} = $r->{n};
+	} else {
+	    $old_level->{$r->{pk}} = $r->{o};
+	    $new_level->{$r->{pk}} = $r->{n};
+	}
+    }
+    print OUTPUT "-"x$plen." | "."-"x$olen." | "."-"x$nlen." | ".
+	"-"x$platlen."\n";
+    print OUTPUT $t;
+}
+
+{
+    my $q = <<'SQL';
+select package as pk ,version as v,
+	GROUP_CONCAT(platform) as ps
+FROM new_package
+	GROUP BY package,version
+ORDER BY package,platform
+SQL
+    my $sth = $dbh->prepare($q) or die $!;
+    $sth->execute();
+
+    print OUTPUT "\n\n## New Packages\n\n";
+    print OUTPUT "Package | Version | Platforms\n";
+    print OUTPUT "--- | --- | ---\n";
+    while (my $r = $sth->fetchrow_hashref) {
+	print OUTPUT join(' | ',($r->{pk}, $r->{v}, $r->{ps}))."\n" ;
+	if ($r->{pk} eq 'machine-xml') {
+	    $new_level->{$r->{ps}."-xml"} = $r->{v};
+	}
+    }
+}
+
+{
+    my $q = <<'SQL';
+select package as pk ,version as v,
+	GROUP_CONCAT(platform) as ps
+FROM removed_package
+	GROUP BY package,version
+ORDER BY package,platform
+SQL
+    my $sth = $dbh->prepare($q) or die $!;
+    $sth->execute();
+
+    print OUTPUT "\n\n## Removed Packages\n\n";
+    print OUTPUT "Package | Version | Platforms\n";
+    print OUTPUT "--- | --- | ---\n";
+    while (my $r = $sth->fetchrow_hashref) {
+	print OUTPUT join(' | ',($r->{pk}, $r->{v}, $r->{ps}))."\n" ;
+	if ($r->{pk} eq $r->{ps}."-xml") {
+	    $old_level->{$r->{ps}."-xml"} = $r->{v};
+	}
+    }
+    print OUTPUT "\n\n";
+}
 
 foreach my $repo (keys %{$repos})
 {
@@ -55,64 +317,17 @@ foreach my $repo (keys %{$repos})
 system("cd op-build; git checkout $end_release --force; git reset HEAD --hard");
 
 
-open(OP_SUMMARY, "cd op-build; ".
-        "git diff $begin_release...$end_release --name-only |".
-        "grep -e \"\.mk\" -e \"Config.in\" |".
-        "xargs git diff $begin_release...$end_release -- |".
-        "grep -e '^[+-][^[:space:]]*_VERSION' ".
-        "-e'^[+-][[:space:]]*default.*if.*LATEST_VERSION' |") || die;
-
-my $old_level = {};
-my $new_level = {};
-
-while(my $line = <OP_SUMMARY>)
-{
-    chomp $line;
-    if ($line =~ m/\$/) # Sanity check there are not variables here.
-    {
-        next;
-    }
-    if ($line =~ m/-([^[:space:]]*)_VERSION([[:space:]]*\?*=[[:space:]]*)(.*)/)
-    {
-        print "Old $1:$3\n";
-        $old_level->{$1} = $3;
-    }
-    if ($line =~ m/\+([^[:space:]]*)_VERSION([[:space:]]*\?*=[[:space:]]*)(.*)/)
-    {
-        print "New $1:$3\n";
-        $new_level->{$1} = $3;
-    }
-    if ($line =~ m/-[[:space:]]*default[[:space:]]*"([^[:space:]]*)"[[:space:]]*if[[:space:]]BR2_([^[:space:]]*)_LATEST_VERSION/)
-    {
-        print "Old $2:$1\n";
-        $old_level->{$2} = $1;
-    }
-    if ($line =~ m/\+[[:space:]]*default[[:space:]]*"([^[:space:]]*)"[[:space:]]*if[[:space:]]BR2_([^[:space:]]*)_LATEST_VERSION/)
-    {
-        print "New $2:$1\n";
-        $new_level->{$2} = $1;
-    }
-}
-
-open(OUTPUT, "> RELEASE.md") || die "Failed to open RELEASE.md";
-
-print OUTPUT "# Release Notes for OpenPower Firmware $end_release\n";
-
 my $op_url = $repos->{'op-build'}->{REPO};
 
 foreach my $repo (sort keys %{$repos})
 {
-    next if (not exists $repos->{$repo}->{PACKAGE});
-
-    my $package = $repos->{$repo}->{PACKAGE};
+    my $package = $repo;
     my $url = $repos->{$repo}->{REPO};
     my $dir = $repos->{$repo}->{DIR};
 
-    print OUTPUT "## Package: $repo\n";
+    print OUTPUT "\n## Package: $repo\n";
     print OUTPUT "[Repository]($url)\n";
     print OUTPUT "\n";
-
-    my $package = $repos->{$repo}->{PACKAGE};
 
     # Display patches.
     if (open(LSLOG, "ls op-build/$dir/*.patch | ".
@@ -140,7 +355,7 @@ foreach my $repo (sort keys %{$repos})
     {
         # No change identified.
         print "No changes: $repo\n";
-        print OUTPUT "No changes.\n";
+        print OUTPUT "No changes.\n\n";
         next;
     }
 
@@ -148,15 +363,15 @@ foreach my $repo (sort keys %{$repos})
         (exists $new_level->{$package}))
     {
         print "Changes in $repo...\n";
-
         open(GITLOG, "cd $repo; git shortlog $old_level->{$package}...".
                      "$new_level->{$package} --no-merges --format=".
-                     "\"* [%h]($url/commit/%h) %s\" |");
+                     "\"- [%h]($url/commit/%h) %s\" |");
 
         while (my $logline = <GITLOG>)
         {
             chomp $logline;
             $logline =~ s/^[[:space:]]*//;
+            $logline =~ s/:$/:\n/;
             print OUTPUT "$logline\n";
         }
         close GITLOG;
